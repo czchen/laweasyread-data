@@ -19,6 +19,7 @@ dependencies:
     optimist: \~0.3.5
     request: \~2.16.6
     sprintf: \~0.1.1
+    sha1: \~1.0.1
     shelljs: \~0.1.2
     winston: \~0.7.1
 devDependencies:
