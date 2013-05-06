@@ -1,44 +1,42 @@
-require!<[fs mkdirp moment optimist winston ../lib/util]>
+require!<[fs mkdirp moment optimist sha1 winston ../lib/util]>
 
-updateName = (name_array, new_name, date) ->
-    for name in name_array
+updateName = (law, new_name, date) ->
+    for name in law.name
         if name.name == new_name
             if moment date .isBefore name.start_date
                 name.start_date = date
             return
-    name_array.push { name: new_name, start_date: date }
+    law.name.push { name: new_name, start_date: date }
 
-updateHistory = (history, date, reason) ->
-    if history[date] != void
-        if history[date] != reason
-            history[date] .= "\n#reason"
+updateHistory = (law, date, reason) ->
+    if law.history[date] != void
+        if law.history[date] != reason
+            law.history[date] .= "\n#reason"
         return
-    history[date] = reason
+    law.history[date] = reason
 
-updateArticle = (all_article, article) ->
-    for item, index in all_article
-        if item.article == article.article && item.content == article.content
-            if moment item.passed_date .isAfter article.passed_date
-                item.passed_date = article.passed_date
-            return
-    all_article.push article
+updateArticle = (law, date, article_no, content) ->
+    if law.article[date] == void
+        law.article[date] = {}
+    digest = sha1 content
+    law.article[date][article_no] = digest
+    law.content[digest] = content
 
-fixupData = (data, opts) ->
-    if data.statute.lyID == \90077
-        data.statute.name.push {
+fixupData = (law, opts) ->
+    if law.lyID == \90077
+        law.name.push do
             name: \外交部特派員公署組織條例
             start_date: \1943-08-28
-        }
 
-    data.statute.PCode = opts.lookupPCode data.statute
-    data
+    law.PCode = opts.lookupPCode law
+    law
 
 parseHTML = (path, opts) ->
-    ret =
-        statute:
-            name: []
-            history: {}
-        article: []
+    law =
+        name: []
+        history: {}
+        article: {}
+        content: {}
 
     for file in fs.readdirSync path
         if /\d+\.htm/ != file
@@ -61,19 +59,19 @@ parseHTML = (path, opts) ->
             | /<title>法編號:(\d{5})\s+版本:(\d{3})(\d{2})(\d{2})\d{2}/
                 # 版本是 民國年(3) + 月(2) + 日(2) + 兩數字 組成
                 # We use ISO-8601 format as statute version
-                ret.statute.lyID = that.1
+                law.lyID = that.1
                 passed_date = util.toISODate that.2, that.3, that.4
 
-                winston.info "Match lyID #{ret.statute.lyID}, version #{passed_date}"
+                winston.info "Match lyID #{law.lyID}, version #{passed_date}"
 
             | /<FONT COLOR=blue SIZE=5>([^(（]+)/
                 name = that.1
                 winston.info "Found name: #name"
-                updateName ret.statute.name, that.1, passed_date
+                updateName law, that.1, passed_date
 
             | /<font size=2>(中華民國 \d+ 年 \d+ 月 \d+ 日)(.*)?<\/font/
                 if date and reason
-                    updateHistory ret.statute.history, date, reason
+                    updateHistory law, date, reason
                     date = void
                     reason = void
 
@@ -88,7 +86,7 @@ parseHTML = (path, opts) ->
                     reason = that
                     winston.info "Found reason #reason"
 
-                    updateHistory ret.statute.history, date, reason
+                    updateHistory law, date, reason
 
                     date = void
                     reason = void
@@ -103,7 +101,7 @@ parseHTML = (path, opts) ->
                 if not date
                     winston.warn "Found reason: #reason without date"
 
-                updateHistory ret.statute.history, date, reason
+                updateHistory law, date, reason
 
                 date = void
                 reason = void
@@ -129,11 +127,9 @@ parseHTML = (path, opts) ->
                     winston.info "Match article content"
                     if article == void
                         article =
-                            article: article_no
-                            lyID: ret.statute.lyID
-                            content: ""
-                            passed_date: passed_date
-                    article.content += content + "\n"
+                            no: article_no
+                            content: ''
+                    article.content += content + '\n'
                     article_no = 1 + parseInt article_no, 10
                 else
                     winston.info "Found partial reason: #content"
@@ -154,7 +150,7 @@ parseHTML = (path, opts) ->
 
                 reason += '\n' + content
 
-                updateHistory ret.statute.history, date, reason
+                updateHistory law, date, reason
 
                 date = void
                 reason = void
@@ -164,7 +160,7 @@ parseHTML = (path, opts) ->
 
             | /<font color=8000ff>第(.*)條(?:之(.*))?/
                 if article
-                    updateArticle ret.article, article
+                    updateArticle law, passed_date, article.no, article.content
 
                 article_no = util.parseZHNumber that.1 .toString!
                 if that.3
@@ -173,23 +169,21 @@ parseHTML = (path, opts) ->
                 winston.info "Found article number #article_no"
 
                 article =
-                    article: article_no
-                    lyID: ret.statute.lyID
-                    content: ""
-                    passed_date: passed_date
+                    no: article_no
+                    content: ''
 
             | /^</
                 if article and article.content != ""
-                    updateArticle ret.article, article
+                    updateArticle law, passed_date, article.no, article.content
                     article = void
 
         if date or reason
             winston.warn "Found orphan date: #date or reason: #reason"
 
         if article
-            updateArticle ret.article, article
+            updateArticle law, passed_date, article.no, article.content
 
-    fixupData ret, opts
+    fixupData law, opts
 
 createPCodeMapping = (path, callback) ->
     err, data <- fs.readFile path
@@ -203,10 +197,10 @@ createPCodeMapping = (path, callback) ->
 createLookupPCodeFunc = (path, callback) ->
     err, pcodeMapping <- createPCodeMapping path
     if err => return callback err
-    callback null, (statute) ->
-        for i, item of statute.name
+    callback null, (law) ->
+        for i, item of law.name
             if pcodeMapping[item.name] != void => return pcodeMapping[item.name]
-        switch statute.lyID
+        switch law.lyID
         | \04507 => fallthrough
         | \04509 => fallthrough
         | \04511 => fallthrough
@@ -224,12 +218,13 @@ main = ->
     } .boolean \verbose .alias \v, \verbose
         .argv
 
+    winston.clear!
+
     if not argv.verbose
         winston
-            .remove winston.transports.Console
             .add winston.transports.Console, { level: \warn }
 
-    (err, lookupPCode) <- createLookupPCodeFunc argv.pcode
+    err, lookupPCode <- createLookupPCodeFunc argv.pcode
     if err => winston.warn err; lookupPCode = -> void
 
     for path in fs.readdirSync argv.rawdata
@@ -240,14 +235,11 @@ main = ->
         if not fs.statSync(indir).isDirectory() => continue
 
         winston.info "Process #indir"
-        data = parseHTML indir, {
+        law = parseHTML indir, do
             lookupPCode: lookupPCode
-        }
 
         mkdirp.sync outdir
-        winston.info "Write #outdir/article.json"
-        fs.writeFileSync "#outdir/article.json", JSON.stringify data.article, '', 2
-        winston.info "Write #outdir/statute.json"
-        fs.writeFileSync "#outdir/statute.json", JSON.stringify data.statute, '', 2
+        winston.info "Write #outdir/law.json"
+        fs.writeFileSync "#outdir/law.json", JSON.stringify law, '', 2
 
 main!
